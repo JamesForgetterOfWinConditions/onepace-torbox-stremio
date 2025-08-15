@@ -27,7 +27,7 @@ const TORBOX_API_BASE = 'https://api.torbox.app/v1/api';
 // Manifest for the addon
 const manifest = {
     id: 'com.onepace.torbox',
-    version: '1.0.2',
+    version: '1.0.3',
     name: 'One Pace (TorBox)',
     description: 'One Pace episodes streamed through TorBox debrid service',
     logo: 'https://onepace.net/images/logo.png',
@@ -36,7 +36,7 @@ const manifest = {
     catalogs: [
         {
             type: 'series',
-            id: 'onepace',
+            id: 'onepace-torbox',
             name: 'One Pace',
             extra: [
                 { name: 'search', isRequired: false },
@@ -44,7 +44,7 @@ const manifest = {
             ]
         }
     ],
-    idPrefixes: ['onepace:'],
+    idPrefixes: ['onepace'],
     behaviorHints: {
         adult: false,
         p2p: false,
@@ -208,31 +208,34 @@ async function fetchOnePaceData() {
 }
 
 function formatEpisodeData(episodes) {
-    const series = {
-        id: 'onepace',
-        type: 'series',
-        name: 'One Pace',
-        poster: 'https://onepace.net/images/logo.png',
-        background: 'https://onepace.net/images/background.jpg',
-        description: 'One Pace is a fan project that recuts One Piece to bring it more in line with the pacing of the original manga.',
-        videos: []
-    };
+    const metas = [];
 
     episodes.forEach((episode, index) => {
         if (episode.released && episode.torrent) {
-            series.videos.push({
-                id: `onepace:${episode.id}`,
-                title: `${episode.arc.title} - Part ${episode.part}`,
-                overview: `Manga chapters: ${episode.manga}`,
-                episode: index + 1,
-                season: 1,
-                released: new Date(episode.released).toISOString(),
-                thumbnail: 'https://onepace.net/images/episode-thumb.jpg'
+            metas.push({
+                id: `onepace${episode.id}`,
+                type: 'series',
+                name: `One Pace: ${episode.arc.title}`,
+                poster: 'https://images.justwatch.com/poster/244890632/s718/one-piece.jpg',
+                background: 'https://images.justwatch.com/backdrop/177834441/s1920/one-piece.jpg',
+                description: `${episode.arc.title} - Part ${episode.part}\nManga chapters: ${episode.manga}`,
+                releaseInfo: new Date(episode.released).getFullYear().toString(),
+                imdbRating: '8.9',
+                genres: ['Animation', 'Adventure', 'Comedy'],
+                videos: [{
+                    id: `onepace${episode.id}:1:1`,
+                    title: `${episode.arc.title} - Part ${episode.part}`,
+                    overview: `Manga chapters: ${episode.manga}`,
+                    episode: 1,
+                    season: 1,
+                    released: new Date(episode.released).toISOString(),
+                    thumbnail: 'https://images.justwatch.com/poster/244890632/s718/one-piece.jpg'
+                }]
             });
         }
     });
 
-    return series;
+    return metas;
 }
 
 // Helper function to extract API key from various sources
@@ -252,8 +255,10 @@ function extractApiKey(req) {
 
 // Helper function to extract episode ID
 function extractEpisodeId(id) {
-    if (id.startsWith('onepace:')) {
-        return id.replace('onepace:', '');
+    // Handle formats like: onepace123, onepace123:1:1
+    if (id.startsWith('onepace')) {
+        const cleanId = id.replace('onepace', '').split(':')[0];
+        return cleanId;
     }
     return id;
 }
@@ -269,14 +274,14 @@ app.get('/:config/manifest.json', (req, res) => {
     res.json(manifest);
 });
 
-app.get('/catalog/series/onepace.json', async (req, res) => {
+app.get('/catalog/series/onepace-torbox.json', async (req, res) => {
     try {
         res.setHeader('Content-Type', 'application/json');
         const episodes = await fetchOnePaceData();
-        const series = formatEpisodeData(episodes);
+        const metas = formatEpisodeData(episodes);
         
         res.json({
-            metas: [series]
+            metas: metas
         });
     } catch (error) {
         console.error('Error in catalog route:', error);
@@ -284,14 +289,14 @@ app.get('/catalog/series/onepace.json', async (req, res) => {
     }
 });
 
-app.get('/:config/catalog/series/onepace.json', async (req, res) => {
+app.get('/:config/catalog/series/onepace-torbox.json', async (req, res) => {
     try {
         res.setHeader('Content-Type', 'application/json');
         const episodes = await fetchOnePaceData();
-        const series = formatEpisodeData(episodes);
+        const metas = formatEpisodeData(episodes);
         
         res.json({
-            metas: [series]
+            metas: metas
         });
     } catch (error) {
         console.error('Error in catalog route:', error);
@@ -517,19 +522,23 @@ app.get('/meta/series/:id.json', async (req, res) => {
         }
 
         const meta = {
-            id: `onepace:${episodeId}`,
+            id: `onepace${episodeId}`,
             type: 'series',
-            name: `${episode.arc.title} - Part ${episode.part}`,
-            poster: 'https://onepace.net/images/logo.png',
-            background: 'https://onepace.net/images/background.jpg',
-            description: `Manga chapters: ${episode.manga}\nReleased: ${new Date(episode.released).toLocaleDateString()}`,
+            name: `One Pace: ${episode.arc.title}`,
+            poster: 'https://images.justwatch.com/poster/244890632/s718/one-piece.jpg',
+            background: 'https://images.justwatch.com/backdrop/177834441/s1920/one-piece.jpg',
+            description: `${episode.arc.title} - Part ${episode.part}\nManga chapters: ${episode.manga}\nReleased: ${new Date(episode.released).toLocaleDateString()}`,
+            releaseInfo: new Date(episode.released).getFullYear().toString(),
+            imdbRating: '8.9',
+            genres: ['Animation', 'Adventure', 'Comedy'],
             videos: [{
-                id: `onepace:${episodeId}`,
+                id: `onepace${episodeId}:1:1`,
                 title: `${episode.arc.title} - Part ${episode.part}`,
                 overview: `Manga chapters: ${episode.manga}`,
                 episode: 1,
                 season: 1,
-                released: new Date(episode.released).toISOString()
+                released: new Date(episode.released).toISOString(),
+                thumbnail: 'https://images.justwatch.com/poster/244890632/s718/one-piece.jpg'
             }]
         };
 
