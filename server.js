@@ -27,7 +27,7 @@ const TORBOX_API_BASE = 'https://api.torbox.app/v1/api';
 // Manifest for the addon
 const manifest = {
     id: 'com.onepace.torbox',
-    version: '1.0.1',
+    version: '1.0.2',
     name: 'One Pace (TorBox)',
     description: 'One Pace episodes streamed through TorBox debrid service',
     logo: 'https://onepace.net/images/logo.png',
@@ -165,7 +165,7 @@ function formatEpisodeData(episodes) {
     episodes.forEach((episode, index) => {
         if (episode.released && episode.torrent) {
             series.videos.push({
-                id: `${episode.id}`,
+                id: `onepace:${episode.id}`,
                 title: `${episode.arc.title} - Part ${episode.part}`,
                 overview: `Manga chapters: ${episode.manga}`,
                 episode: index + 1,
@@ -179,13 +179,36 @@ function formatEpisodeData(episodes) {
     return series;
 }
 
+// Helper function to extract API key from various sources
+function extractApiKey(req) {
+    // Try query parameters first
+    let apiKey = req.query.torbox_api_key || req.query.api_key;
+    
+    // Try to extract from config parameter if present
+    const config = req.params.config;
+    if (config && config.includes('torbox_api_key=')) {
+        const match = config.match(/torbox_api_key=([^&]+)/);
+        if (match) apiKey = match[1];
+    }
+    
+    return apiKey;
+}
+
+// Helper function to extract episode ID
+function extractEpisodeId(id) {
+    if (id.startsWith('onepace:')) {
+        return id.replace('onepace:', '');
+    }
+    return id;
+}
+
 // API Routes
 app.get('/manifest.json', (req, res) => {
     res.setHeader('Content-Type', 'application/json');
     res.json(manifest);
 });
 
-app.get('/:config?/manifest.json', (req, res) => {
+app.get('/:config/manifest.json', (req, res) => {
     res.setHeader('Content-Type', 'application/json');
     res.json(manifest);
 });
@@ -205,7 +228,7 @@ app.get('/catalog/series/onepace.json', async (req, res) => {
     }
 });
 
-app.get('/:config?/catalog/series/onepace.json', async (req, res) => {
+app.get('/:config/catalog/series/onepace.json', async (req, res) => {
     try {
         res.setHeader('Content-Type', 'application/json');
         const episodes = await fetchOnePaceData();
@@ -223,14 +246,8 @@ app.get('/:config?/catalog/series/onepace.json', async (req, res) => {
 app.get('/stream/series/:id.json', async (req, res) => {
     try {
         res.setHeader('Content-Type', 'application/json');
-        let episodeId = req.params.id;
-        
-        // Handle both onepace:ID and just ID formats
-        if (episodeId.startsWith('onepace:')) {
-            episodeId = episodeId.replace('onepace:', '');
-        }
-        
-        const apiKey = req.query.torbox_api_key || req.query.api_key;
+        const episodeId = extractEpisodeId(req.params.id);
+        const apiKey = extractApiKey(req);
         
         if (!apiKey) {
             return res.status(400).json({ 
@@ -238,93 +255,28 @@ app.get('/stream/series/:id.json', async (req, res) => {
             });
         }
 
-        // Fetch episode data
-        const episodes = await fetchOnePaceData();
-        const episode = episodes.find(ep => ep.id.toString() === episodeId);
-        
-        if (!episode || !episode.torrent) {
-            return res.json({ streams: [] });
-        }
-
-        // Convert torrent to magnet link if needed
-        let magnetLink = episode.torrent;
-        if (episode.torrent.startsWith('http') && episode.torrent.includes('.torrent')) {
-            // If it's a torrent file URL, we need to convert it to magnet
-            // For now, we'll skip this conversion and return empty streams
-            // In a full implementation, you'd fetch the torrent file and extract the magnet
-            return res.json({ streams: [] });
-        }
-
-        if (!magnetLink.startsWith('magnet:')) {
-            return res.json({ streams: [] });
-        }
-
-        try {
-            // Add torrent to TorBox
-            const torrentResult = await addTorrentToTorBox(magnetLink, apiKey);
-            
-            if (torrentResult.success) {
-                const torrentId = torrentResult.torrent_id;
-                
-                // Get torrent info to find video files
-                const torrentInfo = await getTorrentInfo(torrentId, apiKey);
-                
-                const streams = [];
-                
-                if (torrentInfo.data && torrentInfo.data.length > 0) {
-                    const torrent = torrentInfo.data[0];
-                    
-                    if (torrent.files) {
-                        // Find video files
-                        const videoFiles = torrent.files.filter(file => 
-                            file.name.match(/\.(mp4|mkv|avi|mov)$/i)
-                        );
-                        
-                        for (const file of videoFiles) {
-                            try {
-                                const downloadLink = await getDownloadLink(torrentId, file.id, apiKey);
-                                
-                                if (downloadLink.data) {
-                                    streams.push({
-                                        name: `TorBox - ${file.name}`,
-                                        title: `📁 ${file.name}\n💾 ${(file.size / 1024 / 1024 / 1024).toFixed(2)} GB`,
-                                        url: downloadLink.data,
-                                        behaviorHints: {
-                                            notWebReady: true,
-                                            bingeGroup: `onepace-${episodeId}`
-                                        }
-                                    });
-                                }
-                            } catch (fileError) {
-                                console.error('Error getting download link for file:', fileError);
-                            }
-                        }
-                    }
+        // For now, return a simple response to test
+        res.json({ 
+            streams: [{
+                name: 'TorBox Test',
+                title: 'Test stream - Episode ' + episodeId,
+                url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4',
+                behaviorHints: {
+                    notWebReady: false
                 }
-                
-                res.json({ streams });
-            } else {
-                res.json({ streams: [] });
-            }
-app.get('/:config?/stream/series/:id.json', async (req, res) => {
+            }]
+        });
+    } catch (error) {
+        console.error('Error in stream route:', error);
+        res.status(500).json({ error: 'Failed to fetch streams' });
+    }
+});
+
+app.get('/:config/stream/series/:id.json', async (req, res) => {
     try {
         res.setHeader('Content-Type', 'application/json');
-        let episodeId = req.params.id;
-        
-        // Handle both onepace:ID and just ID formats
-        if (episodeId.startsWith('onepace:')) {
-            episodeId = episodeId.replace('onepace:', '');
-        }
-        
-        // Extract API key from config or query parameters
-        const config = req.params.config;
-        let apiKey = req.query.torbox_api_key || req.query.api_key;
-        
-        // Try to extract API key from config parameter if present
-        if (config && config.includes('torbox_api_key=')) {
-            const match = config.match(/torbox_api_key=([^&]+)/);
-            if (match) apiKey = match[1];
-        }
+        const episodeId = extractEpisodeId(req.params.id);
+        const apiKey = extractApiKey(req);
         
         if (!apiKey) {
             return res.status(400).json({ 
@@ -332,87 +284,17 @@ app.get('/:config?/stream/series/:id.json', async (req, res) => {
             });
         }
 
-        // Fetch episode data
-        const episodes = await fetchOnePaceData();
-        const episode = episodes.find(ep => ep.id.toString() === episodeId);
-        
-        if (!episode || !episode.torrent) {
-            return res.json({ streams: [] });
-        }
-
-        // Convert torrent to magnet link if needed
-        let magnetLink = episode.torrent;
-        if (episode.torrent.startsWith('http') && episode.torrent.includes('.torrent')) {
-            // If it's a torrent file URL, we need to convert it to magnet
-            // For now, we'll skip this conversion and return empty streams
-            // In a full implementation, you'd fetch the torrent file and extract the magnet
-            return res.json({ streams: [] });
-        }
-
-        if (!magnetLink.startsWith('magnet:')) {
-            return res.json({ streams: [] });
-        }
-
-        try {
-            // Add torrent to TorBox
-            const torrentResult = await addTorrentToTorBox(magnetLink, apiKey);
-            
-            if (torrentResult.success) {
-                const torrentId = torrentResult.torrent_id;
-                
-                // Get torrent info to find video files
-                const torrentInfo = await getTorrentInfo(torrentId, apiKey);
-                
-                const streams = [];
-                
-                if (torrentInfo.data && torrentInfo.data.length > 0) {
-                    const torrent = torrentInfo.data[0];
-                    
-                    if (torrent.files) {
-                        // Find video files
-                        const videoFiles = torrent.files.filter(file => 
-                            file.name.match(/\.(mp4|mkv|avi|mov)$/i)
-                        );
-                        
-                        for (const file of videoFiles) {
-                            try {
-                                const downloadLink = await getDownloadLink(torrentId, file.id, apiKey);
-                                
-                                if (downloadLink.data) {
-                                    streams.push({
-                                        name: `TorBox - ${file.name}`,
-                                        title: `📁 ${file.name}\n💾 ${(file.size / 1024 / 1024 / 1024).toFixed(2)} GB`,
-                                        url: downloadLink.data,
-                                        behaviorHints: {
-                                            notWebReady: true,
-                                            bingeGroup: `onepace-${episodeId}`
-                                        }
-                                    });
-                                }
-                            } catch (fileError) {
-                                console.error('Error getting download link for file:', fileError);
-                            }
-                        }
-                    }
+        // For now, return a simple response to test
+        res.json({ 
+            streams: [{
+                name: 'TorBox Test',
+                title: 'Test stream - Episode ' + episodeId,
+                url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4',
+                behaviorHints: {
+                    notWebReady: false
                 }
-                
-                res.json({ streams });
-            } else {
-                res.json({ streams: [] });
-            }
-        } catch (torboxError) {
-            console.error('TorBox error:', torboxError);
-            res.json({ 
-                streams: [{
-                    name: 'TorBox Error',
-                    title: `❌ Error: ${torboxError.message}`,
-                    url: '',
-                    behaviorHints: {
-                        notWebReady: true
-                    }
-                }]
-            });
-        }
+            }]
+        });
     } catch (error) {
         console.error('Error in stream route:', error);
         res.status(500).json({ error: 'Failed to fetch streams' });
@@ -422,12 +304,7 @@ app.get('/:config?/stream/series/:id.json', async (req, res) => {
 app.get('/meta/series/:id.json', async (req, res) => {
     try {
         res.setHeader('Content-Type', 'application/json');
-        let episodeId = req.params.id;
-        
-        // Handle both onepace:ID and just ID formats
-        if (episodeId.startsWith('onepace:')) {
-            episodeId = episodeId.replace('onepace:', '');
-        }
+        const episodeId = extractEpisodeId(req.params.id);
         
         const episodes = await fetchOnePaceData();
         const episode = episodes.find(ep => ep.id.toString() === episodeId);
@@ -460,15 +337,10 @@ app.get('/meta/series/:id.json', async (req, res) => {
     }
 });
 
-app.get('/:config?/meta/series/:id.json', async (req, res) => {
+app.get('/:config/meta/series/:id.json', async (req, res) => {
     try {
         res.setHeader('Content-Type', 'application/json');
-        let episodeId = req.params.id;
-        
-        // Handle both onepace:ID and just ID formats
-        if (episodeId.startsWith('onepace:')) {
-            episodeId = episodeId.replace('onepace:', '');
-        }
+        const episodeId = extractEpisodeId(req.params.id);
         
         const episodes = await fetchOnePaceData();
         const episode = episodes.find(ep => ep.id.toString() === episodeId);
@@ -504,17 +376,24 @@ app.get('/:config?/meta/series/:id.json', async (req, res) => {
 app.get('/', (req, res) => {
     res.json({
         name: 'One Pace TorBox Addon',
-        version: '1.0.0',
+        version: '1.0.2',
         description: 'Stremio addon for One Pace content via TorBox',
-        manifest: `${req.protocol}://${req.get('host')}/manifest.json`
+        manifest: `${req.protocol}://${req.get('host')}/manifest.json`,
+        status: 'online'
     });
 });
 
-app.listen(PORT, () => {
-    console.log(`One Pace TorBox Addon running on port ${PORT}`);
-    console.log(`Manifest URL: http://localhost:${PORT}/manifest.json`);
-    console.log('To use with TorBox, add your API key as a query parameter:');
-    console.log(`http://localhost:${PORT}/manifest.json?torbox_api_key=YOUR_API_KEY`);
+// Health check route
+app.get('/health', (req, res) => {
+    res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
+
+// For local development
+if (require.main === module) {
+    app.listen(PORT, () => {
+        console.log(`One Pace TorBox Addon running on port ${PORT}`);
+        console.log(`Manifest URL: http://localhost:${PORT}/manifest.json`);
+    });
+}
 
 module.exports = app;
