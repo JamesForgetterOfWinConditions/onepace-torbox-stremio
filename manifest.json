@@ -21,9 +21,5 @@
       "id": "onepace-catalog",
       "name": "One Pace"
     }
-  ],
-  "behaviorHints": {
-    "configurable": true,
-    "configurationRequired": true
-  }
+  ]
 }
