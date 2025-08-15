@@ -1,13 +1,15 @@
 const express = require('express');
-const cors = require('cors');
+const path = require('path');
+const cors = require('cors'); // Import cors
 const { addonBuilder, getInterface } = require('stremio-addon-sdk');
 const manifest = require('./manifest.json');
 const fetch = require('node-fetch');
 
+// --- All of the addon logic (getEpisodes, handlers, etc.) remains the same ---
+// (No changes are needed in this section)
 const builder = new addonBuilder(manifest);
 let cachedEpisodes = null;
 let cacheTime = null;
-
 async function getEpisodes() {
     if (cachedEpisodes && cacheTime && (Date.now() - cacheTime < 14400000)) { return cachedEpisodes; }
     try {
@@ -24,12 +26,10 @@ async function getEpisodes() {
         return cachedEpisodes;
     } catch (error) { console.error('Error fetching episodes:', error); return cachedEpisodes || []; }
 }
-
 builder.defineCatalogHandler(args => {
     if (args.id === 'onepace-catalog') { const meta = { id: 'onepace-series', name: 'One Pace', type: 'series', poster: 'https://i.imgur.com/k91B01C.jpg', description: 'A fan-edited version of the One Piece anime with filler and padding removed to match the manga’s pacing.', }; return Promise.resolve({ metas: [meta] }); }
     return Promise.resolve({ metas: [] });
 });
-
 builder.defineMetaHandler(async (args) => {
     if (args.id === 'onepace-series') {
         const episodes = await getEpisodes();
@@ -38,7 +38,6 @@ builder.defineMetaHandler(async (args) => {
     }
     return Promise.resolve({ meta: null });
 });
-
 builder.defineStreamHandler(async (args) => {
     if (!args.id.startsWith('onepace:')) return Promise.resolve({ streams: [] });
     const apiKey = args.config && args.config.torbox_api_key;
@@ -53,7 +52,6 @@ builder.defineStreamHandler(async (args) => {
     } catch (error) { console.error('Torbox API Error:', error.message); return Promise.reject(new Error(`Torbox API Error: ${error.message}`)); }
     return Promise.resolve({ streams: [] });
 });
-
 async function getTorboxStream(magnet, apiKey) {
     const TORBOX_API_URL = 'https://api.torbox.app/v1/torrents/add';
     const response = await fetch(TORBOX_API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` }, body: JSON.stringify({ link: magnet }) });
@@ -64,11 +62,23 @@ async function getTorboxStream(magnet, apiKey) {
     return videoFile.stream_link;
 }
 
+// --- FINALIZED SERVER SETUP ---
 const app = express();
 const addonInterface = getInterface(builder);
 
+// Use CORS for all requests
 app.use(cors());
+
+// IMPORTANT: The Stremio SDK middleware now comes BEFORE the static file handlers.
+// This allows it to handle addon routes like /manifest.json, /stream/... etc.
 app.use(addonInterface);
+
+// Routes for the configuration page (now run after the addon middleware)
+app.get('/', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+app.use(express.static(path.join(__dirname, 'public')));
+
 
 // Export the express app for Vercel
 module.exports = app;
