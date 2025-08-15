@@ -3,7 +3,23 @@ const cors = require('cors');
 const fetch = require('node-fetch');
 
 const app = express();
-app.use(cors());
+
+// Enhanced CORS configuration for Stremio
+app.use(cors({
+    origin: '*',
+    methods: ['GET', 'POST', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    credentials: false
+}));
+
+// Additional headers for Stremio compatibility
+app.use((req, res, next) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.header('Cache-Control', 'max-age=3600'); // Cache for 1 hour
+    next();
+});
 
 const PORT = process.env.PORT || 3000;
 const TORBOX_API_BASE = 'https://api.torbox.app/v1/api';
@@ -11,11 +27,11 @@ const TORBOX_API_BASE = 'https://api.torbox.app/v1/api';
 // Manifest for the addon
 const manifest = {
     id: 'com.onepace.torbox',
-    version: '1.0.0',
+    version: '1.0.1',
     name: 'One Pace (TorBox)',
     description: 'One Pace episodes streamed through TorBox debrid service',
     logo: 'https://onepace.net/images/logo.png',
-    resources: ['catalog', 'stream'],
+    resources: ['catalog', 'stream', 'meta'],
     types: ['series'],
     catalogs: [
         {
@@ -23,11 +39,18 @@ const manifest = {
             id: 'onepace',
             name: 'One Pace',
             extra: [
-                { name: 'search', isRequired: false }
+                { name: 'search', isRequired: false },
+                { name: 'skip', isRequired: false }
             ]
         }
     ],
-    idPrefixes: ['onepace']
+    idPrefixes: ['onepace:'],
+    behaviorHints: {
+        adult: false,
+        p2p: false,
+        configurable: true,
+        configurationRequired: false
+    }
 };
 
 // TorBox API helper functions
@@ -158,11 +181,33 @@ function formatEpisodeData(episodes) {
 
 // API Routes
 app.get('/manifest.json', (req, res) => {
+    res.setHeader('Content-Type', 'application/json');
+    res.json(manifest);
+});
+
+app.get('/:config?/manifest.json', (req, res) => {
+    res.setHeader('Content-Type', 'application/json');
     res.json(manifest);
 });
 
 app.get('/catalog/series/onepace.json', async (req, res) => {
     try {
+        res.setHeader('Content-Type', 'application/json');
+        const episodes = await fetchOnePaceData();
+        const series = formatEpisodeData(episodes);
+        
+        res.json({
+            metas: [series]
+        });
+    } catch (error) {
+        console.error('Error in catalog route:', error);
+        res.status(500).json({ error: 'Failed to fetch catalog' });
+    }
+});
+
+app.get('/:config?/catalog/series/onepace.json', async (req, res) => {
+    try {
+        res.setHeader('Content-Type', 'application/json');
         const episodes = await fetchOnePaceData();
         const series = formatEpisodeData(episodes);
         
@@ -177,8 +222,109 @@ app.get('/catalog/series/onepace.json', async (req, res) => {
 
 app.get('/stream/series/:id.json', async (req, res) => {
     try {
-        const episodeId = req.params.id;
-        const apiKey = req.query.torbox_api_key;
+        res.setHeader('Content-Type', 'application/json');
+        let episodeId = req.params.id;
+        
+        // Handle both onepace:ID and just ID formats
+        if (episodeId.startsWith('onepace:')) {
+            episodeId = episodeId.replace('onepace:', '');
+        }
+        
+        const apiKey = req.query.torbox_api_key || req.query.api_key;
+        
+        if (!apiKey) {
+            return res.status(400).json({ 
+                error: 'TorBox API key required. Add ?torbox_api_key=YOUR_KEY to the addon URL in Stremio.' 
+            });
+        }
+
+        // Fetch episode data
+        const episodes = await fetchOnePaceData();
+        const episode = episodes.find(ep => ep.id.toString() === episodeId);
+        
+        if (!episode || !episode.torrent) {
+            return res.json({ streams: [] });
+        }
+
+        // Convert torrent to magnet link if needed
+        let magnetLink = episode.torrent;
+        if (episode.torrent.startsWith('http') && episode.torrent.includes('.torrent')) {
+            // If it's a torrent file URL, we need to convert it to magnet
+            // For now, we'll skip this conversion and return empty streams
+            // In a full implementation, you'd fetch the torrent file and extract the magnet
+            return res.json({ streams: [] });
+        }
+
+        if (!magnetLink.startsWith('magnet:')) {
+            return res.json({ streams: [] });
+        }
+
+        try {
+            // Add torrent to TorBox
+            const torrentResult = await addTorrentToTorBox(magnetLink, apiKey);
+            
+            if (torrentResult.success) {
+                const torrentId = torrentResult.torrent_id;
+                
+                // Get torrent info to find video files
+                const torrentInfo = await getTorrentInfo(torrentId, apiKey);
+                
+                const streams = [];
+                
+                if (torrentInfo.data && torrentInfo.data.length > 0) {
+                    const torrent = torrentInfo.data[0];
+                    
+                    if (torrent.files) {
+                        // Find video files
+                        const videoFiles = torrent.files.filter(file => 
+                            file.name.match(/\.(mp4|mkv|avi|mov)$/i)
+                        );
+                        
+                        for (const file of videoFiles) {
+                            try {
+                                const downloadLink = await getDownloadLink(torrentId, file.id, apiKey);
+                                
+                                if (downloadLink.data) {
+                                    streams.push({
+                                        name: `TorBox - ${file.name}`,
+                                        title: `📁 ${file.name}\n💾 ${(file.size / 1024 / 1024 / 1024).toFixed(2)} GB`,
+                                        url: downloadLink.data,
+                                        behaviorHints: {
+                                            notWebReady: true,
+                                            bingeGroup: `onepace-${episodeId}`
+                                        }
+                                    });
+                                }
+                            } catch (fileError) {
+                                console.error('Error getting download link for file:', fileError);
+                            }
+                        }
+                    }
+                }
+                
+                res.json({ streams });
+            } else {
+                res.json({ streams: [] });
+            }
+app.get('/:config?/stream/series/:id.json', async (req, res) => {
+    try {
+        res.setHeader('Content-Type', 'application/json');
+        let episodeId = req.params.id;
+        
+        // Handle both onepace:ID and just ID formats
+        if (episodeId.startsWith('onepace:')) {
+            episodeId = episodeId.replace('onepace:', '');
+        }
+        
+        // Extract API key from config or query parameters
+        const config = req.params.config;
+        let apiKey = req.query.torbox_api_key || req.query.api_key;
+        
+        // Try to extract API key from config parameter if present
+        if (config && config.includes('torbox_api_key=')) {
+            const match = config.match(/torbox_api_key=([^&]+)/);
+            if (match) apiKey = match[1];
+        }
         
         if (!apiKey) {
             return res.status(400).json({ 
@@ -275,7 +421,14 @@ app.get('/stream/series/:id.json', async (req, res) => {
 
 app.get('/meta/series/:id.json', async (req, res) => {
     try {
-        const episodeId = req.params.id;
+        res.setHeader('Content-Type', 'application/json');
+        let episodeId = req.params.id;
+        
+        // Handle both onepace:ID and just ID formats
+        if (episodeId.startsWith('onepace:')) {
+            episodeId = episodeId.replace('onepace:', '');
+        }
+        
         const episodes = await fetchOnePaceData();
         const episode = episodes.find(ep => ep.id.toString() === episodeId);
         
@@ -284,14 +437,55 @@ app.get('/meta/series/:id.json', async (req, res) => {
         }
 
         const meta = {
-            id: episodeId,
+            id: `onepace:${episodeId}`,
             type: 'series',
             name: `${episode.arc.title} - Part ${episode.part}`,
             poster: 'https://onepace.net/images/logo.png',
             background: 'https://onepace.net/images/background.jpg',
             description: `Manga chapters: ${episode.manga}\nReleased: ${new Date(episode.released).toLocaleDateString()}`,
             videos: [{
-                id: episodeId,
+                id: `onepace:${episodeId}`,
+                title: `${episode.arc.title} - Part ${episode.part}`,
+                overview: `Manga chapters: ${episode.manga}`,
+                episode: 1,
+                season: 1,
+                released: new Date(episode.released).toISOString()
+            }]
+        };
+
+        res.json({ meta });
+    } catch (error) {
+        console.error('Error in meta route:', error);
+        res.status(500).json({ error: 'Failed to fetch metadata' });
+    }
+});
+
+app.get('/:config?/meta/series/:id.json', async (req, res) => {
+    try {
+        res.setHeader('Content-Type', 'application/json');
+        let episodeId = req.params.id;
+        
+        // Handle both onepace:ID and just ID formats
+        if (episodeId.startsWith('onepace:')) {
+            episodeId = episodeId.replace('onepace:', '');
+        }
+        
+        const episodes = await fetchOnePaceData();
+        const episode = episodes.find(ep => ep.id.toString() === episodeId);
+        
+        if (!episode) {
+            return res.status(404).json({ error: 'Episode not found' });
+        }
+
+        const meta = {
+            id: `onepace:${episodeId}`,
+            type: 'series',
+            name: `${episode.arc.title} - Part ${episode.part}`,
+            poster: 'https://onepace.net/images/logo.png',
+            background: 'https://onepace.net/images/background.jpg',
+            description: `Manga chapters: ${episode.manga}\nReleased: ${new Date(episode.released).toLocaleDateString()}`,
+            videos: [{
+                id: `onepace:${episodeId}`,
                 title: `${episode.arc.title} - Part ${episode.part}`,
                 overview: `Manga chapters: ${episode.manga}`,
                 episode: 1,
