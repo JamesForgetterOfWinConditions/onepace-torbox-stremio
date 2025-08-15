@@ -67,6 +67,22 @@ const app = express();
 const addonInterface = getInterface(builder);
 
 app.use(cors());
+
+// This middleware translates the user-friendly "?torbox_api_key=" query
+// into the internal Base64 format that the Stremio SDK expects.
+app.use((req, res, next) => {
+    const apiKey = req.query.torbox_api_key;
+    if (apiKey && typeof apiKey === 'string') {
+        const config = { torbox_api_key: apiKey };
+        const configString = Buffer.from(JSON.stringify(config)).toString('base64');
+        
+        // Rewrite the URL to include the Base64 config in the path
+        // e.g., /manifest.json?torbox_api_key=123 -> /ey.../manifest.json
+        req.url = `/${configString}${req.path}`;
+    }
+    next();
+});
+
 app.use(addonInterface);
 
 // Export the express app for Vercel
