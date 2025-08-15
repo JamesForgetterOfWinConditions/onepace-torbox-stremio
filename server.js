@@ -24,10 +24,14 @@ app.use((req, res, next) => {
 const PORT = process.env.PORT || 3000;
 const TORBOX_API_BASE = 'https://api.torbox.app/v1/api';
 
+// In-memory cache for torrent processing
+const torrentCache = new Map();
+const CACHE_DURATION = 30 * 60 * 1000; // 30 minutes
+
 // Manifest for the addon
 const manifest = {
     id: 'com.onepace.torbox',
-    version: '1.0.3',
+    version: '1.0.4',
     name: 'One Pace (TorBox)',
     description: 'One Pace episodes streamed through TorBox debrid service',
     logo: 'https://onepace.net/images/logo.png',
@@ -62,12 +66,17 @@ async function torboxRequest(endpoint, options = {}, apiKey) {
         ...options.headers
     };
 
+    console.log(`TorBox API Request: ${options.method || 'GET'} ${url}`);
+
     const response = await fetch(url, {
         ...options,
-        headers
+        headers,
+        timeout: 30000 // 30 second timeout
     });
 
     if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`TorBox API Error: ${response.status} ${response.statusText}`, errorText);
         throw new Error(`TorBox API error: ${response.status} ${response.statusText}`);
     }
 
@@ -76,12 +85,28 @@ async function torboxRequest(endpoint, options = {}, apiKey) {
 
 async function addTorrentToTorBox(magnetLink, apiKey) {
     try {
+        // Check if we already have this torrent cached
+        const cacheKey = `torrent_${magnetLink}`;
+        const cached = torrentCache.get(cacheKey);
+        if (cached && Date.now() - cached.timestamp < CACHE_DURATION) {
+            console.log('Using cached torrent data');
+            return cached.data;
+        }
+
         const result = await torboxRequest('/torrents/createtorrent', {
             method: 'POST',
             body: JSON.stringify({
-                magnet: magnetLink
+                magnet: magnetLink,
+                seed: 1 // Keep seeding
             })
         }, apiKey);
+
+        // Cache the result
+        torrentCache.set(cacheKey, {
+            data: result,
+            timestamp: Date.now()
+        });
+
         return result;
     } catch (error) {
         console.error('Error adding torrent to TorBox:', error);
@@ -103,9 +128,10 @@ async function getTorrentInfo(torrentId, apiKey) {
 
 async function getDownloadLink(torrentId, fileId, apiKey) {
     try {
-        const result = await torboxRequest(`/torrents/requestdl?token=${apiKey}&torrent_id=${torrentId}&file_id=${fileId}`, {
+        // Use the correct endpoint format
+        const result = await torboxRequest(`/torrents/requestdl?torrent_id=${torrentId}&file_id=${fileId}`, {
             method: 'GET'
-        });
+        }, apiKey);
         return result;
     } catch (error) {
         console.error('Error getting download link:', error);
@@ -113,9 +139,43 @@ async function getDownloadLink(torrentId, fileId, apiKey) {
     }
 }
 
+async function waitForTorrentReady(torrentId, apiKey, maxWaitTime = 60000) {
+    const startTime = Date.now();
+    const checkInterval = 3000; // Check every 3 seconds
+
+    while (Date.now() - startTime < maxWaitTime) {
+        try {
+            const torrentInfo = await getTorrentInfo(torrentId, apiKey);
+            
+            if (torrentInfo.data && torrentInfo.data.length > 0) {
+                const torrent = torrentInfo.data[0];
+                
+                // Check if torrent is ready (downloaded or cached)
+                if (torrent.download_state === 'downloaded' || 
+                    torrent.download_state === 'cached' ||
+                    torrent.download_finished === true) {
+                    return torrent;
+                }
+                
+                console.log(`Torrent ${torrentId} status: ${torrent.download_state}, progress: ${torrent.progress}%`);
+            }
+            
+            // Wait before next check
+            await new Promise(resolve => setTimeout(resolve, checkInterval));
+        } catch (error) {
+            console.error('Error checking torrent status:', error);
+            await new Promise(resolve => setTimeout(resolve, checkInterval));
+        }
+    }
+    
+    throw new Error('Torrent not ready within timeout period');
+}
+
 // One Pace data fetching functions
 async function fetchOnePaceData() {
     try {
+        console.log('Fetching One Pace data...');
+        
         // Try the GraphQL API first
         try {
             const response = await fetch('https://onepace.net/api/graphql', {
@@ -139,20 +199,23 @@ async function fetchOnePaceData() {
                             }
                         }
                     `
-                })
+                }),
+                timeout: 10000
             });
 
             if (response.ok) {
                 const data = await response.json();
                 if (data && data.data && data.data.episodes) {
+                    console.log(`Fetched ${data.data.episodes.length} episodes from GraphQL API`);
                     return data.data.episodes;
                 }
             }
         } catch (graphqlError) {
-            console.log('GraphQL API not available, using fallback data');
+            console.log('GraphQL API not available, using fallback data:', graphqlError.message);
         }
 
-        // Fallback: Return mock data based on known One Pace episodes
+        // Enhanced fallback with more realistic data structure
+        console.log('Using fallback episode data');
         return [
             {
                 id: 1,
@@ -161,7 +224,7 @@ async function fetchOnePaceData() {
                 part: 1,
                 manga: "1-7",
                 released: "2014-03-16T00:00:00Z",
-                torrent: "magnet:?xt=urn:btih:example1&dn=One%20Pace%20Romance%20Dawn%2001"
+                torrent: null // Will be populated when real API is available
             },
             {
                 id: 2,
@@ -170,7 +233,7 @@ async function fetchOnePaceData() {
                 part: 1,
                 manga: "8-21",
                 released: "2014-03-20T00:00:00Z",
-                torrent: "magnet:?xt=urn:btih:example2&dn=One%20Pace%20Orange%20Town%2001"
+                torrent: null
             },
             {
                 id: 3,
@@ -179,7 +242,7 @@ async function fetchOnePaceData() {
                 part: 1,
                 manga: "22-41",
                 released: "2014-04-01T00:00:00Z",
-                torrent: "magnet:?xt=urn:btih:example3&dn=One%20Pace%20Syrup%20Village%2001"
+                torrent: null
             },
             {
                 id: 4,
@@ -188,7 +251,7 @@ async function fetchOnePaceData() {
                 part: 1,
                 manga: "42-68",
                 released: "2014-04-15T00:00:00Z",
-                torrent: "magnet:?xt=urn:btih:example4&dn=One%20Pace%20Baratie%2001"
+                torrent: null
             },
             {
                 id: 5,
@@ -197,12 +260,11 @@ async function fetchOnePaceData() {
                 part: 1,
                 manga: "69-95",
                 released: "2014-05-01T00:00:00Z",
-                torrent: "magnet:?xt=urn:btih:example5&dn=One%20Pace%20Arlong%20Park%2001"
+                torrent: null
             }
         ];
     } catch (error) {
         console.error('Error fetching One Pace data:', error);
-        // Return empty array if everything fails
         return [];
     }
 }
@@ -211,7 +273,7 @@ function formatEpisodeData(episodes) {
     const metas = [];
 
     episodes.forEach((episode, index) => {
-        if (episode.released && episode.torrent) {
+        if (episode.released) {
             metas.push({
                 id: `onepace${episode.id}`,
                 type: 'series',
@@ -250,17 +312,156 @@ function extractApiKey(req) {
         if (match) apiKey = match[1];
     }
     
+    // Try environment variable as last resort
+    if (!apiKey) {
+        apiKey = process.env.TORBOX_API_KEY;
+    }
+    
     return apiKey;
 }
 
 // Helper function to extract episode ID
 function extractEpisodeId(id) {
-    // Handle formats like: onepace123, onepace123:1:1
     if (id.startsWith('onepace')) {
         const cleanId = id.replace('onepace', '').split(':')[0];
         return cleanId;
     }
     return id;
+}
+
+// Enhanced stream processing function
+async function processStreamRequest(episodeId, apiKey) {
+    console.log(`Processing stream request for episode ${episodeId}`);
+    
+    if (!apiKey || apiKey === 'test') {
+        return [{
+            name: 'TorBox Setup Required',
+            title: '⚠️ Please add your TorBox API key to the addon URL\n\nGet your API key from torbox.app → Settings → API',
+            url: '',
+            behaviorHints: { notWebReady: true }
+        }];
+    }
+
+    // Fetch episode data
+    const episodes = await fetchOnePaceData();
+    const episode = episodes.find(ep => ep.id.toString() === episodeId);
+    
+    if (!episode) {
+        return [{
+            name: 'Episode Not Found',
+            title: `❌ Episode ${episodeId} not found in catalog`,
+            url: '',
+            behaviorHints: { notWebReady: true }
+        }];
+    }
+
+    if (!episode.torrent) {
+        return [{
+            name: 'No Torrent Available',
+            title: `⚠️ No torrent available for ${episode.arc.title} - Part ${episode.part}\n\nThis may be because:\n• Episode not yet released\n• GraphQL API unavailable\n• Using fallback data`,
+            url: '',
+            behaviorHints: { notWebReady: true }
+        }];
+    }
+
+    try {
+        console.log(`Processing torrent for ${episode.arc.title} - Part ${episode.part}`);
+        const magnetLink = episode.torrent;
+        
+        // Add torrent to TorBox
+        const torrentResult = await addTorrentToTorBox(magnetLink, apiKey);
+        console.log('Torrent add result:', torrentResult);
+        
+        if (!torrentResult.success) {
+            throw new Error('Failed to add torrent to TorBox');
+        }
+
+        const torrentId = torrentResult.torrent_id;
+        console.log(`Torrent ID: ${torrentId}`);
+        
+        // Wait for torrent to be ready or use cached version
+        let torrent;
+        try {
+            torrent = await waitForTorrentReady(torrentId, apiKey, 30000); // 30 second timeout
+        } catch (waitError) {
+            console.log('Torrent not immediately ready, checking current status...');
+            const torrentInfo = await getTorrentInfo(torrentId, apiKey);
+            if (torrentInfo.data && torrentInfo.data.length > 0) {
+                torrent = torrentInfo.data[0];
+            } else {
+                throw waitError;
+            }
+        }
+
+        const streams = [];
+        
+        if (torrent && torrent.files) {
+            console.log(`Found ${torrent.files.length} files in torrent`);
+            
+            // Find video files (prioritize larger files and common video formats)
+            const videoFiles = torrent.files
+                .filter(file => file.name.match(/\.(mp4|mkv|avi|mov|m4v|webm)$/i))
+                .sort((a, b) => b.size - a.size); // Sort by size, largest first
+
+            console.log(`Found ${videoFiles.length} video files`);
+
+            for (const file of videoFiles.slice(0, 3)) { // Limit to top 3 files
+                try {
+                    console.log(`Getting download link for file: ${file.name}`);
+                    const downloadLink = await getDownloadLink(torrentId, file.id, apiKey);
+                    
+                    if (downloadLink.success && downloadLink.data) {
+                        const sizeGB = (file.size / 1024 / 1024 / 1024).toFixed(2);
+                        
+                        streams.push({
+                            name: `TorBox - ${episode.arc.title}`,
+                            title: `📺 ${file.name}\n💾 ${sizeGB} GB\n⚡ Quality: ${getQualityFromFilename(file.name)}`,
+                            url: downloadLink.data,
+                            behaviorHints: {
+                                notWebReady: false,
+                                bingeGroup: `onepace-${episodeId}`
+                            }
+                        });
+                    }
+                } catch (fileError) {
+                    console.error(`Error getting download link for file ${file.name}:`, fileError);
+                }
+            }
+        }
+        
+        // If no streams found but torrent exists, provide status info
+        if (streams.length === 0) {
+            const status = torrent ? torrent.download_state : 'unknown';
+            const progress = torrent ? torrent.progress : 0;
+            
+            streams.push({
+                name: `TorBox - ${episode.arc.title}`,
+                title: `⏳ Processing torrent...\n📊 Status: ${status}\n📈 Progress: ${progress}%\n\nTry again in a few minutes`,
+                url: '',
+                behaviorHints: { notWebReady: true }
+            });
+        }
+        
+        return streams;
+        
+    } catch (torboxError) {
+        console.error('TorBox error:', torboxError);
+        return [{
+            name: 'TorBox Error',
+            title: `❌ TorBox Error: ${torboxError.message}\n\nPlease check:\n• Your API key is valid\n• Your TorBox account is active\n• The torrent is accessible`,
+            url: '',
+            behaviorHints: { notWebReady: true }
+        }];
+    }
+}
+
+// Helper function to determine quality from filename
+function getQualityFromFilename(filename) {
+    if (filename.match(/1080p|1920x1080/i)) return '1080p';
+    if (filename.match(/720p|1280x720/i)) return '720p';
+    if (filename.match(/480p|854x480/i)) return '480p';
+    if (filename.match(/4k|2160p/i)) return '4K';
+    return 'Unknown';
 }
 
 // API Routes
@@ -280,9 +481,7 @@ app.get('/catalog/series/onepace-torbox.json', async (req, res) => {
         const episodes = await fetchOnePaceData();
         const metas = formatEpisodeData(episodes);
         
-        res.json({
-            metas: metas
-        });
+        res.json({ metas: metas });
     } catch (error) {
         console.error('Error in catalog route:', error);
         res.status(500).json({ error: 'Failed to fetch catalog' });
@@ -295,9 +494,7 @@ app.get('/:config/catalog/series/onepace-torbox.json', async (req, res) => {
         const episodes = await fetchOnePaceData();
         const metas = formatEpisodeData(episodes);
         
-        res.json({
-            metas: metas
-        });
+        res.json({ metas: metas });
     } catch (error) {
         console.error('Error in catalog route:', error);
         res.status(500).json({ error: 'Failed to fetch catalog' });
@@ -310,127 +507,9 @@ app.get('/stream/series/:id.json', async (req, res) => {
         const episodeId = extractEpisodeId(req.params.id);
         const apiKey = extractApiKey(req);
         
-        if (!apiKey || apiKey === 'test') {
-            return res.json({ 
-                streams: [{
-                    name: 'TorBox Setup Required',
-                    title: '⚠️ Please add your TorBox API key to the addon URL\n\nGet your API key from torbox.app → Settings → API',
-                    url: '',
-                    behaviorHints: {
-                        notWebReady: true
-                    }
-                }]
-            });
-        }
-
-        // Fetch episode data
-        const episodes = await fetchOnePaceData();
-        const episode = episodes.find(ep => ep.id.toString() === episodeId);
+        const streams = await processStreamRequest(episodeId, apiKey);
+        res.json({ streams });
         
-        if (!episode) {
-            return res.json({ 
-                streams: [{
-                    name: 'Episode Not Found',
-                    title: `❌ Episode ${episodeId} not found in catalog`,
-                    url: '',
-                    behaviorHints: {
-                        notWebReady: true
-                    }
-                }]
-            });
-        }
-
-        if (!episode.torrent) {
-            return res.json({ 
-                streams: [{
-                    name: 'No Torrent Available',
-                    title: `⚠️ No torrent available for ${episode.arc.title} - Part ${episode.part}`,
-                    url: '',
-                    behaviorHints: {
-                        notWebReady: true
-                    }
-                }]
-            });
-        }
-
-        // For now, return a placeholder with episode info while we test
-        return res.json({ 
-            streams: [{
-                name: `TorBox - ${episode.arc.title}`,
-                title: `📺 ${episode.arc.title} - Part ${episode.part}\n📖 Manga chapters: ${episode.manga}\n⚠️ TorBox integration in progress...`,
-                url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4',
-                behaviorHints: {
-                    notWebReady: false,
-                    bingeGroup: `onepace-${episodeId}`
-                }
-            }]
-        });
-
-        // TODO: Implement actual TorBox integration once basic functionality is confirmed
-        /*
-        try {
-            const magnetLink = episode.torrent;
-            
-            // Add torrent to TorBox
-            const torrentResult = await addTorrentToTorBox(magnetLink, apiKey);
-            
-            if (torrentResult.success) {
-                const torrentId = torrentResult.torrent_id;
-                
-                // Get torrent info to find video files
-                const torrentInfo = await getTorrentInfo(torrentId, apiKey);
-                
-                const streams = [];
-                
-                if (torrentInfo.data && torrentInfo.data.length > 0) {
-                    const torrent = torrentInfo.data[0];
-                    
-                    if (torrent.files) {
-                        // Find video files
-                        const videoFiles = torrent.files.filter(file => 
-                            file.name.match(/\.(mp4|mkv|avi|mov)$/i)
-                        );
-                        
-                        for (const file of videoFiles) {
-                            try {
-                                const downloadLink = await getDownloadLink(torrentId, file.id, apiKey);
-                                
-                                if (downloadLink.data) {
-                                    streams.push({
-                                        name: `TorBox - ${file.name}`,
-                                        title: `📁 ${file.name}\n💾 ${(file.size / 1024 / 1024 / 1024).toFixed(2)} GB`,
-                                        url: downloadLink.data,
-                                        behaviorHints: {
-                                            notWebReady: true,
-                                            bingeGroup: `onepace-${episodeId}`
-                                        }
-                                    });
-                                }
-                            } catch (fileError) {
-                                console.error('Error getting download link for file:', fileError);
-                            }
-                        }
-                    }
-                }
-                
-                res.json({ streams });
-            } else {
-                res.json({ streams: [] });
-            }
-        } catch (torboxError) {
-            console.error('TorBox error:', torboxError);
-            res.json({ 
-                streams: [{
-                    name: 'TorBox Error',
-                    title: `❌ TorBox Error: ${torboxError.message}`,
-                    url: '',
-                    behaviorHints: {
-                        notWebReady: true
-                    }
-                }]
-            });
-        }
-        */
     } catch (error) {
         console.error('Error in stream route:', error);
         res.status(500).json({ 
@@ -438,9 +517,7 @@ app.get('/stream/series/:id.json', async (req, res) => {
                 name: 'Server Error',
                 title: `❌ Server Error: ${error.message}`,
                 url: '',
-                behaviorHints: {
-                    notWebReady: true
-                }
+                behaviorHints: { notWebReady: true }
             }]
         });
     }
@@ -452,48 +529,9 @@ app.get('/:config/stream/series/:id.json', async (req, res) => {
         const episodeId = extractEpisodeId(req.params.id);
         const apiKey = extractApiKey(req);
         
-        if (!apiKey || apiKey === 'test') {
-            return res.json({ 
-                streams: [{
-                    name: 'TorBox Setup Required',
-                    title: '⚠️ Please add your TorBox API key to the addon URL\n\nGet your API key from torbox.app → Settings → API',
-                    url: '',
-                    behaviorHints: {
-                        notWebReady: true
-                    }
-                }]
-            });
-        }
-
-        // Fetch episode data
-        const episodes = await fetchOnePaceData();
-        const episode = episodes.find(ep => ep.id.toString() === episodeId);
+        const streams = await processStreamRequest(episodeId, apiKey);
+        res.json({ streams });
         
-        if (!episode) {
-            return res.json({ 
-                streams: [{
-                    name: 'Episode Not Found',
-                    title: `❌ Episode ${episodeId} not found in catalog`,
-                    url: '',
-                    behaviorHints: {
-                        notWebReady: true
-                    }
-                }]
-            });
-        }
-
-        // For now, return a placeholder with episode info while we test
-        return res.json({ 
-            streams: [{
-                name: `TorBox - ${episode.arc.title}`,
-                title: `📺 ${episode.arc.title} - Part ${episode.part}\n📖 Manga chapters: ${episode.manga}\n⚠️ TorBox integration in progress...`,
-                url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4',
-                behaviorHints: {
-                    notWebReady: false,
-                    bingeGroup: `onepace-${episodeId}`
-                }
-            }]
-        });
     } catch (error) {
         console.error('Error in stream route:', error);
         res.status(500).json({ 
@@ -501,9 +539,7 @@ app.get('/:config/stream/series/:id.json', async (req, res) => {
                 name: 'Server Error',
                 title: `❌ Server Error: ${error.message}`,
                 url: '',
-                behaviorHints: {
-                    notWebReady: true
-                }
+                behaviorHints: { notWebReady: true }
             }]
         });
     }
@@ -562,19 +598,21 @@ app.get('/:config/meta/series/:id.json', async (req, res) => {
         }
 
         const meta = {
-            id: `onepace:${episodeId}`,
+            id: `onepace${episodeId}`,
             type: 'series',
-            name: `${episode.arc.title} - Part ${episode.part}`,
+            name: `One Pace: ${episode.arc.title}`,
             poster: 'https://onepace.net/images/logo.png',
-            background: 'https://onepace.net/images/background.jpg',
-            description: `Manga chapters: ${episode.manga}\nReleased: ${new Date(episode.released).toLocaleDateString()}`,
+            background: 'https://images.justwatch.com/backdrop/177834441/s1920/one-piece.jpg',
+            description: `${episode.arc.title} - Part ${episode.part}\nManga chapters: ${episode.manga}\nReleased: ${new Date(episode.released).toLocaleDateString()}`,
+            releaseInfo: new Date(episode.released).getFullYear().toString(),
             videos: [{
-                id: `onepace:${episodeId}`,
+                id: `onepace${episodeId}:1:1`,
                 title: `${episode.arc.title} - Part ${episode.part}`,
                 overview: `Manga chapters: ${episode.manga}`,
                 episode: 1,
                 season: 1,
-                released: new Date(episode.released).toISOString()
+                released: new Date(episode.released).toISOString(),
+                thumbnail: 'https://onepace.net/images/logo.png'
             }]
         };
 
@@ -585,19 +623,42 @@ app.get('/:config/meta/series/:id.json', async (req, res) => {
     }
 });
 
+// Root endpoint
 app.get('/', (req, res) => {
     res.json({
         name: 'One Pace TorBox Addon',
-        version: '1.0.2',
+        version: manifest.version,
         description: 'Stremio addon for One Pace content via TorBox',
         manifest: `${req.protocol}://${req.get('host')}/manifest.json`,
-        status: 'online'
+        status: 'online',
+        endpoints: {
+            manifest: '/manifest.json',
+            catalog: '/catalog/series/onepace-torbox.json',
+            stream: '/stream/series/{id}.json',
+            meta: '/meta/series/{id}.json'
+        }
     });
 });
 
 // Health check route
 app.get('/health', (req, res) => {
-    res.json({ status: 'ok', timestamp: new Date().toISOString() });
+    res.json({ 
+        status: 'ok', 
+        timestamp: new Date().toISOString(),
+        cache_size: torrentCache.size
+    });
+});
+
+// Debug endpoint (for development)
+app.get('/debug/cache', (req, res) => {
+    if (process.env.NODE_ENV === 'production') {
+        return res.status(404).json({ error: 'Not found' });
+    }
+    
+    res.json({
+        cache_entries: Array.from(torrentCache.keys()),
+        cache_size: torrentCache.size
+    });
 });
 
 // For local development
@@ -605,6 +666,7 @@ if (require.main === module) {
     app.listen(PORT, () => {
         console.log(`One Pace TorBox Addon running on port ${PORT}`);
         console.log(`Manifest URL: http://localhost:${PORT}/manifest.json`);
+        console.log(`With API key: http://localhost:${PORT}/manifest.json?torbox_api_key=YOUR_KEY`);
     });
 }
 
