@@ -1,9 +1,26 @@
 const express = require('express');
 const cors = require('cors');
 const { addonBuilder, getInterface } = require('stremio-addon-sdk');
-const manifest = require('../manifest.json');
+// Correctly references manifest.json from one directory up.
+const manifest = require('../manifest.json'); 
 
 const builder = new addonBuilder(manifest);
+const addonInterface = getInterface(builder);
+const app = express();
+
+// --- Robust CORS Configuration ---
+// This manually configured CORS setup is more explicit than the default
+// and ensures the correct headers are sent on every request.
+const corsOptions = {
+  origin: '*', // Allow requests from any origin
+  methods: 'GET,HEAD,PUT,PATCH,POST,DELETE',
+  preflightContinue: false,
+  optionsSuccessStatus: 204
+};
+app.use(cors(corsOptions));
+
+
+// --- Addon Logic (Unchanged) ---
 let cachedEpisodes = null;
 let cacheTime = null;
 
@@ -44,7 +61,7 @@ builder.defineStreamHandler(async (args) => {
     if (!apiKey) return Promise.reject(new Error('Torbox API Key not configured.'));
     const episodes = await getEpisodes();
     const episode = episodes.find(ep => ep.id === args.id);
-    if (!episode || !episode.torrents || episode.torrents.length === 0) return Promise.resolve({ streams: [] });
+    if (!episode || !episode.torrents || !episode.torrents.length === 0) return Promise.resolve({ streams: [] });
     const magnetLink = episode.torrents[0];
     try {
         const streamUrl = await getTorboxStream(magnetLink, apiKey);
@@ -63,26 +80,19 @@ async function getTorboxStream(magnet, apiKey) {
     return videoFile.stream_link;
 }
 
-const app = express();
-const addonInterface = getInterface(builder);
-
-app.use(cors());
-
-// This middleware translates the user-friendly "?torbox_api_key=" query
-// into the internal Base64 format that the Stremio SDK expects.
+// --- Middleware for Handling URL ---
+// This comes AFTER the CORS middleware to ensure headers are already set.
 app.use((req, res, next) => {
     const apiKey = req.query.torbox_api_key;
     if (apiKey && typeof apiKey === 'string') {
         const config = { torbox_api_key: apiKey };
         const configString = Buffer.from(JSON.stringify(config)).toString('base64');
-        
-        // Rewrite the URL to include the Base64 config in the path
-        // e.g., /manifest.json?torbox_api_key=123 -> /ey.../manifest.json
         req.url = `/${configString}${req.path}`;
     }
     next();
 });
 
+// --- Final Handler ---
 app.use(addonInterface);
 
 // Export the express app for Vercel
