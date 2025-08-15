@@ -2,7 +2,6 @@ const express = require('express');
 const cors = require('cors');
 const { addonBuilder, getInterface } = require('stremio-addon-sdk');
 const manifest = require('./manifest.json');
-const fetch = require('node-fetch');
 
 const builder = new addonBuilder(manifest);
 let cachedEpisodes = null;
