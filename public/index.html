@@ -24,7 +24,7 @@
         <a id="install-link" href="#"></a>
     </div>
 
-    <script>
+<script>
         function configure() {
             const apiKey = document.getElementById('apiKey').value;
             if (!apiKey) {
@@ -33,14 +33,28 @@
             }
 
             const config = { torbox_api_key: apiKey };
-            const configString = btoa(JSON.stringify(config)); // Base64 encode the config
+            const configString = btoa(JSON.stringify(config));
             
-            const addonUrl = `${window.location.origin}/${configString}/manifest.json`;
-            const installUrl = `stremio://installaddon?url=${encodeURIComponent(addonUrl)}`;
+            // The full URL to your addon's manifest, including the configuration
+            const addonManifestUrl = `${window.location.origin}/${configString}/manifest.json`;
+            
+            // The special Stremio protocol link for installation
+            const installUrl = `stremio://installaddon?url=${encodeURIComponent(addonManifestUrl)}`;
 
-            // Redirect user to install
-            window.location.href = installUrl;
+            // For debugging: This will print the exact link being used in your browser's developer console.
+            console.log("Generated Stremio Install URL:", installUrl);
+            
+            // Find the link element we left in the HTML
+            const installLink = document.getElementById('install-link');
+            
+            // Update the link's href and text
+            installLink.href = installUrl;
+            installLink.textContent = 'If you are not redirected, click here to install.';
+            
+            // Programmatically clicking the link is often more reliable for custom protocols
+            // than changing window.location.href directly.
+            installLink.click();
         }
-    </script>
+</script>
 </body>
 </html>
