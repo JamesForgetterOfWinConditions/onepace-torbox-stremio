@@ -26,35 +26,41 @@
 
 <script>
         function configure() {
+            // DEBUG STEP 1: Check if the function is running
+            console.log("Configure function started.");
+
             const apiKey = document.getElementById('apiKey').value;
             if (!apiKey) {
                 alert('Please enter a valid Torbox API key.');
                 return;
             }
 
+            // DEBUG STEP 2: Check what the browser thinks the website's address is
+            const origin = window.location.origin;
+            console.log("Detected page origin:", origin);
+
+            if (!origin || origin === 'null') {
+                 alert("CRITICAL ERROR: Could not determine the website's address (origin). Cannot create install link.");
+                 return;
+            }
+
             const config = { torbox_api_key: apiKey };
             const configString = btoa(JSON.stringify(config));
             
-            // The full URL to your addon's manifest, including the configuration
-            const addonManifestUrl = `${window.location.origin}/${configString}/manifest.json`;
-            
-            // The special Stremio protocol link for installation
+            const addonManifestUrl = `${origin}/${configString}/manifest.json`;
             const installUrl = `stremio://installaddon?url=${encodeURIComponent(addonManifestUrl)}`;
 
-            // For debugging: This will print the exact link being used in your browser's developer console.
+            // DEBUG STEP 3: This is the most important log. It shows the final link.
             console.log("Generated Stremio Install URL:", installUrl);
             
-            // Find the link element we left in the HTML
+            // This alert will remind you to look at the console.
+            alert("Now, please check your browser's developer console (press F12) for the debugging messages.");
+
             const installLink = document.getElementById('install-link');
-            
-            // Update the link's href and text
             installLink.href = installUrl;
             installLink.textContent = 'If you are not redirected, click here to install.';
-            
-            // Programmatically clicking the link is often more reliable for custom protocols
-            // than changing window.location.href directly.
             installLink.click();
         }
-</script>
+    </script>
 </body>
 </html>
