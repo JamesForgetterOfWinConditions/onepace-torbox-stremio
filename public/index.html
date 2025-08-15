@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>One Pace Torbox Addon Configuration</title>
+    <style>
+        body { font-family: sans-serif; background-color: #1a1a1a; color: #fff; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+        .container { background-color: #2c2c2c; padding: 2em; border-radius: 8px; text-align: center; box-shadow: 0 4px 12px rgba(0,0,0,0.5); }
+        h1 { margin-top: 0; }
+        p { color: #ccc; }
+        input { width: 90%; padding: 10px; margin: 1em 0; border-radius: 4px; border: 1px solid #555; background-color: #333; color: #fff; }
+        button { padding: 10px 20px; border: none; border-radius: 4px; background-color: #ae4528; color: white; font-size: 1em; cursor: pointer; }
+        button:hover { background-color: #c45a3f; }
+        #install-link { display: block; margin-top: 1.5em; color: #ae4528; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>One Pace (Torbox) Addon</h1>
+        <p>Please enter your Torbox API key to configure the addon.</p>
+        <input type="text" id="apiKey" placeholder="Your Torbox API Key" required>
+        <button onclick="configure()">Install Addon</button>
+        <a id="install-link" href="#"></a>
+    </div>
+
+<script>
+        function configure() {
+            // DEBUG STEP 1: Check if the function is running
+            console.log("Configure function started.");
+
+            const apiKey = document.getElementById('apiKey').value;
+            if (!apiKey) {
+                alert('Please enter a valid Torbox API key.');
+                return;
+            }
+
+            // DEBUG STEP 2: Check what the browser thinks the website's address is
+            const origin = window.location.origin;
+            console.log("Detected page origin:", origin);
+
+            if (!origin || origin === 'null') {
+                 alert("CRITICAL ERROR: Could not determine the website's address (origin). Cannot create install link.");
+                 return;
+            }
+
+            const config = { torbox_api_key: apiKey };
+            const configString = btoa(JSON.stringify(config));
+            
+            const addonManifestUrl = `${origin}/${configString}/manifest.json`;
+            const installUrl = `stremio://installaddon?url=${encodeURIComponent(addonManifestUrl)}`;
+
+            // DEBUG STEP 3: This is the most important log. It shows the final link.
+            console.log("Generated Stremio Install URL:", installUrl);
+            
+            // This alert will remind you to look at the console.
+            alert("Now, please check your browser's developer console (press F12) for the debugging messages.");
+
+            const installLink = document.getElementById('install-link');
+            installLink.href = installUrl;
+            installLink.textContent = 'If you are not redirected, click here to install.';
+            installLink.click();
+        }
+    </script>
+</body>
+</html>
